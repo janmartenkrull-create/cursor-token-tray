@@ -29,6 +29,10 @@ class UsageSnapshot:
     label: str
     tooltip: str
     max_ratio: float | None
+    cursor_pct: float | None = None
+    other_pct: float | None = None
+    is_unlimited: bool = False
+    display_mode: str = "pools"
     error: str | None = None
 
 
@@ -177,22 +181,34 @@ def parse_summary(data: dict[str, Any]) -> UsageSnapshot:
     if display_mode == "overall" and overall_used is not None and overall_limit is not None:
         label = f"{format_cents(overall_used)}/{format_cents(overall_limit)}"
         ratio = overall_used / overall_limit if overall_limit else None
+        overall_pct = ratio * 100 if ratio is not None else None
         lines.append(f"Included: {label}")
+        return UsageSnapshot(
+            label=label,
+            tooltip="\n".join(lines),
+            max_ratio=ratio,
+            cursor_pct=overall_pct,
+            other_pct=overall_pct,
+            is_unlimited=False,
+            display_mode="overall",
+        )
+
+    c_val = None if data.get("isUnlimited") else cursor_pct
+    o_val = None if data.get("isUnlimited") else other_pct
+    c = "∞" if data.get("isUnlimited") else (
+        f"{int(cursor_pct)}%" if cursor_pct is not None else "?"
+    )
+    o = "∞" if data.get("isUnlimited") else (
+        f"{int(other_pct)}%" if other_pct is not None else "?"
+    )
+    label = f"C{c if c == '∞' else c.replace('%', '')} O{o if o == '∞' else o.replace('%', '')}"
+    if plan_total is not None and not data.get("isUnlimited"):
+        ratio = plan_total / 100.0
     else:
-        c = "∞" if data.get("isUnlimited") else (
-            f"{int(cursor_pct)}%" if cursor_pct is not None else "?"
-        )
-        o = "∞" if data.get("isUnlimited") else (
-            f"{int(other_pct)}%" if other_pct is not None else "?"
-        )
-        label = f"C{c if c == '∞' else c.replace('%', '')} O{o if o == '∞' else o.replace('%', '')}"
-        if plan_total is not None and not data.get("isUnlimited"):
-            ratio = plan_total / 100.0
-        else:
-            ratios = [p / 100.0 for p in (cursor_pct, other_pct) if p is not None]
-            ratio = max(ratios) if ratios else None
-        lines.append(f"Cursor Models: {c}")
-        lines.append(f"Other Models: {o}")
+        ratios = [p / 100.0 for p in (cursor_pct, other_pct) if p is not None]
+        ratio = max(ratios) if ratios else None
+    lines.append(f"Cursor Models: {c}")
+    lines.append(f"Other Models: {o}")
 
     od_used = parse_cents(on_demand.get("used")) or parse_cents(
         on_demand.get("usedCents")
@@ -208,7 +224,15 @@ def parse_summary(data: dict[str, Any]) -> UsageSnapshot:
     if isinstance(end, str) and end:
         lines.append(f"Cycle ends: {end[:10]}")
 
-    return UsageSnapshot(label=label, tooltip="\n".join(lines), max_ratio=ratio)
+    return UsageSnapshot(
+        label=label,
+        tooltip="\n".join(lines),
+        max_ratio=ratio,
+        cursor_pct=c_val,
+        other_pct=o_val,
+        is_unlimited=bool(data.get("isUnlimited")),
+        display_mode=display_mode,
+    )
 
 
 def fetch_usage() -> UsageSnapshot:
@@ -256,54 +280,162 @@ def fetch_usage() -> UsageSnapshot:
     return parse_summary(data)
 
 
-def ratio_color(ratio: float | None) -> tuple[int, int, int]:
-    if ratio is None:
-        return (96, 96, 96)
+def pct_arc_color(pct: float) -> tuple[int, int, int]:
+    ratio = pct / 100.0
     if ratio >= 1.0:
-        return (200, 48, 48)
+        return (214, 96, 96)
     if ratio >= 0.8:
-        return (220, 140, 0)
-    if ratio >= 0.4:
-        return (210, 180, 0)
-    return (40, 160, 80)
+        return (214, 156, 96)
+    return (143, 163, 184)
+
+
+def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    candidates = (
+        ("segoeuib.ttf", bold),
+        ("segoeui.ttf", not bold),
+        ("arialbd.ttf", bold),
+        ("arial.ttf", not bold),
+    )
+    for name, want_bold in candidates:
+        if want_bold != bold:
+            continue
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _draw_arc_progress(
+    draw: ImageDraw.ImageDraw,
+    bbox: tuple[float, float, float, float],
+    start: float,
+    sweep: float,
+    ratio: float,
+    color: tuple[int, int, int],
+    width: int,
+) -> None:
+    if ratio <= 0:
+        return
+    end = start + sweep * min(ratio, 1.0)
+    draw.arc(bbox, start=start, end=end, fill=(*color, 255), width=width)
 
 
 def render_icon(snapshot: UsageSnapshot, size: int = 64) -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    bg = ratio_color(snapshot.max_ratio)
-    pad = 4
-    draw.rounded_rectangle(
-        (pad, pad, size - pad, size - pad), radius=10, fill=(*bg, 255)
+
+    pad = max(2, int(size * 0.06))
+    bbox = (pad, pad, size - pad, size - pad)
+    cx = size / 2
+    ring = max(2, int(size * 0.11))
+    bg = (30, 32, 36, 255)
+    track = (54, 58, 64, 255)
+    divider = (42, 45, 50, 255)
+
+    draw.ellipse(bbox, fill=bg)
+
+    if snapshot.error:
+        font = _load_font(max(8, size // 5), bold=True)
+        text = "?"
+        tb = draw.textbbox((0, 0), text, font=font)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        draw.text(
+            (cx - tw / 2, cx - th / 2 - 1),
+            text,
+            fill=(150, 150, 150, 255),
+            font=font,
+        )
+        return img
+
+    # Left semicircle: top -> left -> bottom (90° .. 270°)
+    draw.arc(bbox, 90, 270, fill=track, width=ring)
+    # Right semicircle: bottom -> right -> top (270° .. 90°)
+    draw.arc(bbox, 270, 450, fill=track, width=ring)
+
+    left_ratio = (
+        1.0
+        if snapshot.is_unlimited
+        else (snapshot.cursor_pct or 0) / 100.0
+        if snapshot.cursor_pct is not None
+        else 0.0
+    )
+    right_ratio = (
+        1.0
+        if snapshot.is_unlimited
+        else (snapshot.other_pct or 0) / 100.0
+        if snapshot.other_pct is not None
+        else 0.0
     )
 
-    text = snapshot.label.replace("$", "").replace("/", "\n")
-    if len(text) > 14:
-        text = text[:12] + "…"
-
-    try:
-        font = ImageFont.truetype("segoeui.ttf", 11)
-        font_sm = ImageFont.truetype("segoeui.ttf", 9)
-    except OSError:
-        font = ImageFont.load_default()
-        font_sm = font
-
-    lines = text.split("\n") if "\n" in text else [text]
-    if len(lines) == 1 and " " in text and len(text) > 8:
-        lines = text.split(" ", 1)
-
-    y = size // 2 - (len(lines) * 7)
-    for line in lines[:2]:
-        bbox = draw.textbbox((0, 0), line, font=font_sm if len(line) > 6 else font)
-        tw = bbox[2] - bbox[0]
-        draw.text(
-            ((size - tw) / 2, y),
-            line,
-            fill=(255, 255, 255, 255),
-            font=font_sm if len(line) > 6 else font,
+    if snapshot.display_mode == "overall":
+        accent = pct_arc_color((snapshot.cursor_pct or 0) if snapshot.cursor_pct else 0)
+        _draw_arc_progress(draw, bbox, 90, 180, left_ratio, accent, ring)
+        _draw_arc_progress(draw, bbox, 270, 180, right_ratio, accent, ring)
+    else:
+        _draw_arc_progress(
+            draw,
+            bbox,
+            90,
+            180,
+            left_ratio,
+            pct_arc_color(snapshot.cursor_pct or 0),
+            ring,
         )
-        y += 12
+        _draw_arc_progress(
+            draw,
+            bbox,
+            270,
+            180,
+            right_ratio,
+            pct_arc_color(snapshot.other_pct or 0),
+            ring,
+        )
 
+    draw.line(
+        [(cx, pad + ring // 2), (cx, size - pad - ring // 2)],
+        fill=divider,
+        width=max(1, size // 32),
+    )
+
+    if snapshot.display_mode == "overall":
+        center_text = (
+            f"{int(snapshot.cursor_pct)}%"
+            if snapshot.cursor_pct is not None
+            else "…"
+        )
+        font = _load_font(max(9, size // 4), bold=True)
+        color = (143, 163, 184, 255)
+    elif snapshot.is_unlimited:
+        center_text = "∞"
+        font = _load_font(max(10, size // 3), bold=True)
+        color = (143, 163, 184, 255)
+    else:
+        left_n = "?" if snapshot.cursor_pct is None else str(int(snapshot.cursor_pct))
+        right_n = "?" if snapshot.other_pct is None else str(int(snapshot.other_pct))
+        font = _load_font(max(7, size // 6), bold=True)
+        for text, x_frac, accent in (
+            (left_n, 0.30, pct_arc_color(snapshot.cursor_pct or 0)),
+            (right_n, 0.70, pct_arc_color(snapshot.other_pct or 0)),
+        ):
+            tb = draw.textbbox((0, 0), text, font=font)
+            tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            draw.text(
+                (size * x_frac - tw / 2, cx - th / 2 - 1),
+                text,
+                fill=(*accent, 255),
+                font=font,
+            )
+        return img
+
+    tb = draw.textbbox((0, 0), center_text, font=font)
+    tw, th = tb[2] - tb[0], tb[3] - tb[1]
+    draw.text(
+        (cx - tw / 2, cx - th / 2 - 1),
+        center_text,
+        fill=color,
+        font=font,
+    )
     return img
 
 
