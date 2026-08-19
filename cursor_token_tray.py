@@ -388,7 +388,8 @@ def _make_ico_save(master: Image.Image, layers: list[Image.Image]):
         if format and format.upper() != "ICO":
             return Image.Image.save(master, fp, format, **kwargs)
         sizes = [(img.width, img.height) for img in layers]
-        layers[-1].save(
+        Image.Image.save(
+            layers[-1],
             fp,
             format="ICO",
             sizes=sizes,
