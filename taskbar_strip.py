@@ -20,7 +20,6 @@ STRIP_WIDTH = 256
 TRAY_GAP = 8
 KEEP_ALIVE_MS = 200
 REPOSITION_MS = 1500
-CHROMA = "#ff00ff"
 
 GWL_EXSTYLE = -20
 GWLP_HWNDPARENT = -8
@@ -41,6 +40,12 @@ user32.GetParent.restype = ctypes.c_void_p
 user32.GetParent.argtypes = [ctypes.c_void_p]
 user32.IsWindow.argtypes = [ctypes.c_void_p]
 user32.IsWindow.restype = ctypes.c_bool
+user32.GetDC.argtypes = [ctypes.c_void_p]
+user32.GetDC.restype = ctypes.c_void_p
+user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+gdi32 = ctypes.windll.gdi32
+gdi32.GetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+gdi32.GetPixel.restype = ctypes.c_uint
 
 
 class RECT(ctypes.Structure):
@@ -97,10 +102,41 @@ def _rgb_hex(rgb: tuple[int, int, int]) -> str:
     return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
 
+def _fallback_taskbar_bg(light: bool) -> str:
+    return "#f3f3f3" if light else "#202020"
+
+
+def _sample_taskbar_bg() -> str:
+    rect = _taskbar_rect()
+    if not rect:
+        return _fallback_taskbar_bg(_uses_light_taskbar())
+    hdc = user32.GetDC(0)
+    if not hdc:
+        return _fallback_taskbar_bg(_uses_light_taskbar())
+    try:
+        x = rect.left + max(80, (rect.right - rect.left) // 4)
+        y = rect.top + max(1, (rect.bottom - rect.top) // 2)
+        pixel = gdi32.GetPixel(hdc, x, y)
+        if pixel == 0xFFFFFFFF:
+            return _fallback_taskbar_bg(_uses_light_taskbar())
+        return _rgb_hex((pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF))
+    finally:
+        user32.ReleaseDC(0, hdc)
+
+
+def _apply_bg(widget: tk.Misc, color: str) -> None:
+    widget.configure(bg=color)
+    try:
+        widget["bg"] = color
+    except tk.TclError:
+        pass
+
+
 class TaskbarStripApp:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._light = _uses_light_taskbar()
+        self._bg = _sample_taskbar_bg()
         if self._light:
             self._label_fg = "#4b5563"
             self._track = "#9ca3af"
@@ -118,10 +154,9 @@ class TaskbarStripApp:
         self.root = tk.Tk()
         self.root.title("Cursor Token Usage")
         self.root.overrideredirect(True)
-        self.root.configure(bg=CHROMA)
+        self.root.configure(bg=self._bg)
         self.root.wm_attributes("-toolwindow", True)
         self.root.attributes("-topmost", True)
-        self.root.attributes("-transparentcolor", CHROMA)
 
         self._caption_font = tkfont.Font(family="Segoe UI", size=7)
         self._value_font = tkfont.Font(family="Segoe UI", size=12, weight="bold")
@@ -130,7 +165,7 @@ class TaskbarStripApp:
             self.root,
             width=STRIP_WIDTH,
             height=self._height,
-            bg=CHROMA,
+            bg=self._bg,
             highlightthickness=0,
             bd=0,
         )
@@ -243,12 +278,23 @@ class TaskbarStripApp:
             x = rect.left
         return f"{width}x{height}+{x}+{y}"
 
+    def _sync_background(self) -> None:
+        bg = _sample_taskbar_bg()
+        if bg == self._bg:
+            return
+        self._bg = bg
+        _apply_bg(self.root, bg)
+        _apply_bg(self.canvas, bg)
+        self._draw()
+
     def _reposition(self) -> None:
         geom = self._desired_geometry()
-        if not geom or geom == self._last_geom:
+        if not geom:
             return
-        self._last_geom = geom
-        self.root.geometry(geom)
+        if geom != self._last_geom:
+            self._last_geom = geom
+            self.root.geometry(geom)
+        self._sync_background()
 
     def _keep_alive(self) -> None:
         if self._stop.is_set():
@@ -312,7 +358,7 @@ class TaskbarStripApp:
         w = STRIP_WIDTH
         h = self._height
         c.delete("all")
-        c.create_rectangle(0, 0, w, h, fill=CHROMA, outline="")
+        c.create_rectangle(0, 0, w, h, fill=self._bg, outline="")
 
         snapshot = self._snapshot
         pad = 4

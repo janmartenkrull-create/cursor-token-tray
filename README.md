@@ -47,11 +47,9 @@ On Windows 10 you can register a native toolbar instead:
 
 ## Autostart
 
-Create a shortcut to `start-tray.bat` in:
+Die App legt beim Start automatisch eine Verknüpfung im Windows-Autostart an (`shell:startup`), falls noch keine existiert. Ab dem nächsten Anmelden startet sie mit Windows.
 
-```
-shell:startup
-```
+Autostart deaktivieren: Verknüpfung **Cursor Token Usage** im Autostart-Ordner löschen, oder die App mit `--no-autostart` starten.
 
 ## How it works
 

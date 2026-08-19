@@ -383,9 +383,10 @@ class DeskbandApp:
 
 
 def main() -> None:
-    from install_self import maybe_install
+    from install_self import ensure_autostart, maybe_install
 
     maybe_install()
+    ensure_autostart()
 
     if deskband_available():
         DeskbandApp().run()

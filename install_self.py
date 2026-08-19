@@ -50,24 +50,84 @@ def startup_dir() -> Path:
     return start_menu_dir() / "Startup"
 
 
-def _create_shortcut(lnk: Path, target: Path) -> None:
+def _create_shortcut(
+    lnk: Path,
+    target: Path,
+    arguments: str = "",
+    working_dir: Path | None = None,
+) -> None:
     lnk.parent.mkdir(parents=True, exist_ok=True)
     target_s = str(target).replace("'", "''")
-    work_s = str(target.parent).replace("'", "''")
+    work_s = str((working_dir or target.parent)).replace("'", "''")
     lnk_s = str(lnk).replace("'", "''")
+    args_s = arguments.replace("'", "''")
     script = (
         "$ws = New-Object -ComObject WScript.Shell; "
         f"$s = $ws.CreateShortcut('{lnk_s}'); "
         f"$s.TargetPath = '{target_s}'; "
         f"$s.WorkingDirectory = '{work_s}'; "
         "$s.WindowStyle = 7; "
-        "$s.Save()"
     )
+    if args_s:
+        script += f"$s.Arguments = '{args_s}'; "
+    script += "$s.Save()"
     subprocess.run(
         ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", script],
         check=False,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _pythonw_exe() -> Path:
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        return exe
+    pyw = exe.with_name("pythonw.exe")
+    if pyw.is_file():
+        return pyw
+    pyw_cmd = shutil.which("pyw")
+    if pyw_cmd:
+        return Path(pyw_cmd)
+    return exe
+
+
+def autostart_shortcut() -> Path:
+    return startup_dir() / f"{APP_NAME}.lnk"
+
+
+def ensure_autostart() -> None:
+    """Register a per-user startup shortcut if it is not already present."""
+    if "--no-autostart" in sys.argv:
+        return
+
+    lnk = autostart_shortcut()
+    if lnk.is_file():
+        return
+
+    if is_frozen():
+        target = installed_exe() if installed_exe().is_file() else current_exe()
+        _create_shortcut(lnk, target)
+        return
+
+    script = project_root() / "cursor_token_tray.py"
+    if not script.is_file():
+        return
+    _create_shortcut(
+        lnk,
+        _pythonw_exe(),
+        arguments=f'-3 "{script}"',
+        working_dir=project_root(),
+    )
+
+
+def disable_autostart() -> None:
+    lnk = autostart_shortcut()
+    if lnk.is_file():
+        lnk.unlink()
 
 
 def write_uninstaller(dest_dir: Path) -> None:
