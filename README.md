@@ -77,4 +77,6 @@ Then run `register-deskband.bat` again.
 
 ## License
 
-MIT — includes [PyDeskband](https://github.com/kylebenz/PyDeskband) (MIT) for the taskbar toolbar.
+MIT — see [LICENSE](LICENSE).
+
+Includes [PyDeskband](https://github.com/kylebenz/PyDeskband) (MIT) for the optional Windows 10 taskbar toolbar.
