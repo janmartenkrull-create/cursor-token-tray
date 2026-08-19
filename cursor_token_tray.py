@@ -330,33 +330,56 @@ def _draw_side_label(
     color: tuple[int, int, int],
     anchor: str,
 ) -> None:
-    tb = draw.textbbox((0, 0), text, font=font, anchor=anchor)
-    th = tb[3] - tb[1]
-    draw.text((x, cy), text, fill=(*color, 255), font=font, anchor=anchor)
+    # Dark stroke keeps digits readable on light and dark taskbars.
+    draw.text(
+        (x, cy),
+        text,
+        fill=(*color, 255),
+        font=font,
+        anchor=anchor,
+        stroke_width=max(1, font.size // 10),
+        stroke_fill=(18, 20, 24, 255),
+    )
 
 
-def render_icon(snapshot: UsageSnapshot, size: int = 128) -> Image.Image:
+def _fit_font(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    max_w: int,
+    max_h: int,
+    bold: bool = True,
+) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    for px in range(max_h, 6, -1):
+        font = _load_font(px, bold=bold)
+        box = draw.textbbox((0, 0), text, font=font, anchor="mm")
+        if box[2] - box[0] <= max_w and box[3] - box[1] <= max_h:
+            return font
+    return _load_font(8, bold=bold)
+
+
+def render_icon(snapshot: UsageSnapshot, size: int = 256) -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
     cy = size / 2
-    track = (72, 76, 84, 220)
-    ring = max(3, int(size * 0.14))
+    track = (58, 62, 70, 230)
 
-    # Side labels sit in the margins; the ring stays a true circle.
-    label_w = max(16, int(size * 0.15))
-    ring_d = size - 2 * label_w
+    # Digits dominate; the ring sits in a narrow center band.
+    side_w = int(size * 0.38)
+    ring_w = size - 2 * side_w
+    ring = max(2, int(size * 0.07))
+    ring_d = int(size * 0.58)
+    ring_left = side_w + (ring_w - ring_d) / 2
     ring_top = (size - ring_d) / 2
-    bbox = (label_w, ring_top, size - label_w, ring_top + ring_d)
+    bbox = (ring_left, ring_top, ring_left + ring_d, ring_top + ring_d)
     cx = size / 2
 
     if snapshot.error:
         draw.arc(bbox, 0, 360, fill=track, width=ring)
-        font = _load_font(max(10, size // 6), bold=True)
+        font = _fit_font(draw, "?", side_w, int(size * 0.55))
         _draw_side_label(draw, "?", cx, cy, font, (150, 150, 150), "mm")
         return img
 
-    # Track arcs only — inner area stays transparent.
     draw.arc(bbox, 90, 270, fill=track, width=ring)
     draw.arc(bbox, 270, 450, fill=track, width=ring)
 
@@ -380,7 +403,7 @@ def render_icon(snapshot: UsageSnapshot, size: int = 128) -> Image.Image:
         _draw_arc_progress(draw, bbox, 90, 180, left_ratio, accent, ring)
         _draw_arc_progress(draw, bbox, 270, 180, right_ratio, accent, ring)
         left_text = (
-            f"{int(snapshot.cursor_pct)}%"
+            f"{int(snapshot.cursor_pct)}"
             if snapshot.cursor_pct is not None
             else "…"
         )
@@ -393,12 +416,12 @@ def render_icon(snapshot: UsageSnapshot, size: int = 128) -> Image.Image:
         _draw_arc_progress(draw, bbox, 270, 180, 1.0, right_color, ring)
     else:
         left_text = (
-            f"{int(snapshot.cursor_pct)}%"
+            f"{int(snapshot.cursor_pct)}"
             if snapshot.cursor_pct is not None
             else "?"
         )
         right_text = (
-            f"{int(snapshot.other_pct)}%"
+            f"{int(snapshot.other_pct)}"
             if snapshot.other_pct is not None
             else "?"
         )
@@ -407,11 +430,11 @@ def render_icon(snapshot: UsageSnapshot, size: int = 128) -> Image.Image:
         _draw_arc_progress(draw, bbox, 90, 180, left_ratio, left_color, ring)
         _draw_arc_progress(draw, bbox, 270, 180, right_ratio, right_color, ring)
 
-    font = _load_font(max(9, int(size * 0.13)), bold=True)
-    _draw_side_label(draw, left_text, max(1, label_w * 0.08), cy, font, left_color, "lm")
-    _draw_side_label(
-        draw, right_text, size - max(1, label_w * 0.08), cy, font, right_color, "rm"
-    )
+    label_h = int(size * 0.62)
+    left_font = _fit_font(draw, left_text, side_w - 2, label_h)
+    right_font = _fit_font(draw, right_text, side_w - 2, label_h)
+    _draw_side_label(draw, left_text, side_w / 2, cy, left_font, left_color, "mm")
+    _draw_side_label(draw, right_text, size - side_w / 2, cy, right_font, right_color, "mm")
     return img
 
 
