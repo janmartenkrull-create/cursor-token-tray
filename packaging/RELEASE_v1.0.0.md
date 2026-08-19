@@ -11,7 +11,7 @@ Windows taskbar widget for live Cursor token billing.
 
 ### Install
 1. Download `CursorTokenUsage.exe`
-2. Run it once and choose **Installieren** (or **Nur starten**)
+2. Run it once and choose **Install** (or **Run once**)
 3. Widget appears left of the clock in the taskbar
 
 ### Requirements
