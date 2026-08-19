@@ -34,9 +34,11 @@ Double-click `start-tray.bat`, or:
 pyw -3 cursor_token_tray.py
 ```
 
-A **readable overlay** appears just above the taskbar (left of the tray icons) showing `35%` · ring · `83%`. The small systray icon is only for the menu. Drag the overlay to reposition it; the position is saved.
+The tray icon is a split badge: **35** left (Cursor models), **83** right (other models). Hover for full details.
 
-Right-click the overlay or tray icon: refresh / quit.
+### Windows limitation
+
+Windows only allows **square** tray slots (~16–32 px). Apps cannot request a wider icon. If you need larger text, use the tooltip (hover) or a third-party tool like [Windhawk](https://windhawk.net/) with the “Taskbar notification icon spacing” mod to enlarge tray slots globally.
 
 ## Autostart
 
