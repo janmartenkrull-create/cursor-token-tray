@@ -1,2 +1,1 @@
-Pillow>=10.0.0
-pystray>=0.19.5
+# No Python packages required — stdlib only.

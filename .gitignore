@@ -5,3 +5,9 @@ venv/
 .env
 *.log
 preview*.png
+build/
+dist/*
+!dist/CursorTokenUsage.exe
+*.spec.bak
+test.ico
+vendor/

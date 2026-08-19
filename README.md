@@ -1,44 +1,49 @@
 # Cursor Token Tray
 
-Windows system-tray app that shows live Cursor token billing from the official dashboard API.
+Taskbar display for live Cursor token billing from the official dashboard API.
 
-Inspired by the [Cursor Token Usage](https://open-vsx.org/extension/akitogo/cursor-token-usage) VS Code extension. This tray app works in Cursor's Agent/Glass layout because it runs outside the editor.
+Inspired by the [Cursor Token Usage](https://open-vsx.org/extension/akitogo/cursor-token-usage) VS Code extension. This app works outside Cursor (including Agent/Glass layout) and shows **readable text** in the taskbar area.
 
 ## Features
 
 - Polls `https://cursor.com/api/usage-summary` every **5 minutes**
 - Reads your local Cursor session from `state.vscdb` (no manual token setup if you're signed in)
-- Tray icon with short label, e.g. `C35 O82` or `$12.40/$20.00`
-- Color-coded by usage level (green → yellow → orange → red)
-- Tooltip with details; right-click menu: refresh / quit
+- Taskbar display: `Cursor 35%   Other 83%` (readable width, like weather/clock widgets)
+- Color-coded by usage level (blue → yellow → red)
+- **Windows 11:** uses a docked taskbar widget automatically (native deskbands are removed)
+- **Windows 10:** can use the optional deskband toolbar (see below)
 
-## Requirements
+## Für andere Nutzer (eine Datei)
 
-- Windows 10/11
-- Python 3.10+
-- Cursor signed in on this PC
+1. `packaging\build.bat` ausführen
+2. `dist\CursorTokenUsage.exe` weitergeben (USB, Chat, GitHub Release)
 
-## Install
+Andere brauchen **kein Python**. Beim ersten Start erscheint ein kleiner Dialog:
+
+- **Installieren** — kopiert nach `%LOCALAPPDATA%\CursorTokenUsage`, optional Startmenü + Autostart
+- **Nur starten** — einmalig, ohne Installation
+
+Deinstallieren: `%LOCALAPPDATA%\CursorTokenUsage\Uninstall.bat`
+
+## Entwicklung
 
 ```bat
 git clone https://github.com/janmartenkrull-create/cursor-token-tray.git
 cd cursor-token-tray
-py -3 -m pip install -r requirements.txt
-```
-
-## Run
-
-Double-click `start-tray.bat`, or:
-
-```bat
 pyw -3 cursor_token_tray.py
 ```
 
-The tray icon is a split badge: **35** left (Cursor models), **83** right (other models). Hover for full details.
+Oder `start-tray.bat`. Python 3.10+ mit tkinter, Cursor muss auf dem PC angemeldet sein.
 
-### Windows limitation
+### Optional: deskband toolbar (Windows 10 only)
 
-Windows only allows **square** tray slots (~16–32 px). Apps cannot request a wider icon. If you need larger text, use the tooltip (hover) or a third-party tool like [Windhawk](https://windhawk.net/) with the “Taskbar notification icon spacing” mod to enlarge tray slots globally.
+On Windows 10 you can register a native toolbar instead:
+
+1. Run `register-deskband.bat` as admin
+2. Right-click taskbar → **Toolbars** → **Cursor Token Usage**
+3. Start the app as above
+
+> **Note:** Windows 11 removed classic taskbar toolbars. The deskband DLL can be registered, but Explorer will not load it without third-party tools like [ExplorerPatcher](https://github.com/valinet/ExplorerPatcher).
 
 ## Autostart
 
@@ -50,9 +55,20 @@ shell:startup
 
 ## How it works
 
-1. Reads `cursorAuth/accessToken` and user id from `%APPDATA%\Cursor\User\globalStorage\state.vscdb`
-2. Builds the `WorkosCursorSessionToken` cookie (same as the official extension)
-3. Fetches usage from Cursor's dashboard API only — no local token estimates
+1. A small COM DLL (`pydeskband/dlls/PyDeskband_x64.dll`) draws text on the taskbar
+2. Python polls the Cursor API and updates the display via a named pipe
+3. Session data stays local; requests go only to `cursor.com`
+
+## Building the DLL (optional)
+
+If you change the C++ sources under `vendor/PyDeskband/`:
+
+```bat
+"C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" vendor\PyDeskband\dll\PyDeskband\PyDeskband.sln /p:Configuration=Release /p:Platform=x64
+copy vendor\PyDeskband\dll\PyDeskband\x64\Release\PyDeskband.dll pydeskband\dlls\PyDeskband_x64.dll
+```
+
+Then run `register-deskband.bat` again.
 
 ## Privacy
 
@@ -62,4 +78,4 @@ shell:startup
 
 ## License
 
-MIT
+MIT — includes [PyDeskband](https://github.com/kylebenz/PyDeskband) (MIT) for the taskbar toolbar.

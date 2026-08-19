@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows system-tray display for Cursor token billing (polls every 5 minutes)."""
+"""Taskbar deskband display for Cursor token billing (polls every 5 minutes)."""
 
 from __future__ import annotations
 
@@ -7,21 +7,24 @@ import json
 import os
 import re
 import sqlite3
-import threading
+import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
-import pystray
+from pydeskband.pydeskband import ControlPipe, Justification
 
 POLL_SECONDS = 300
 API_URL = "https://cursor.com/api/usage-summary"
 PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 USER_ID_RE = re.compile(r"user_[a-zA-Z0-9]{20,}")
-TRAY_ICON_SIZES = (16, 24, 32, 48, 64, 128, 256)
+
+LABEL_COLOR = (170, 178, 188)
+ERROR_COLOR = (230, 120, 120)
+WARN_COLOR = (230, 170, 90)
 
 
 @dataclass
@@ -281,167 +284,116 @@ def fetch_usage() -> UsageSnapshot:
 
 
 def pct_arc_color(pct: float) -> tuple[int, int, int]:
-    ratio = pct / 100.0
-    if ratio >= 1.0:
-        return (214, 96, 96)
-    if ratio >= 0.8:
-        return (214, 156, 96)
-    return (143, 163, 184)
+    if pct >= 90:
+        return (255, 120, 120)
+    if pct >= 70:
+        return (255, 190, 110)
+    return (156, 163, 175)
 
 
-def pct_arc_color(pct: float) -> tuple[int, int, int]:
-    ratio = pct / 100.0
-    if ratio >= 1.0:
-        return (214, 96, 96)
-    if ratio >= 0.8:
-        return (214, 156, 96)
-    return (143, 163, 184)
-
-
-def _load_font(size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    names = ("segoeuib.ttf", "arialbd.ttf") if bold else ("segoeui.ttf", "arial.ttf")
-    for name in names:
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
-
-
-def _badge_text(snapshot: UsageSnapshot) -> tuple[str, str]:
+def _value_text(snapshot: UsageSnapshot, side: str) -> str:
     if snapshot.error:
-        return "?", "?"
+        return "?"
     if snapshot.is_unlimited:
-        return "∞", "∞"
+        return "∞"
+    if side == "cursor":
+        if snapshot.display_mode == "overall" and snapshot.label:
+            return snapshot.label
+        if snapshot.cursor_pct is None:
+            return "?"
+        return f"{int(snapshot.cursor_pct)}%"
+    if snapshot.display_mode == "overall" and snapshot.label:
+        return snapshot.label
+    if snapshot.other_pct is None:
+        return "?"
+    return f"{int(snapshot.other_pct)}%"
+
+
+def _value_color(snapshot: UsageSnapshot, side: str) -> tuple[int, int, int]:
+    if snapshot.error:
+        return ERROR_COLOR
+    if snapshot.is_unlimited:
+        return (150, 220, 170)
+    pct = snapshot.cursor_pct if side == "cursor" else snapshot.other_pct
+    if pct is None:
+        return WARN_COLOR
+    return pct_arc_color(pct)
+
+
+def _error_headline(snapshot: UsageSnapshot) -> str:
+    if snapshot.error == "no_session":
+        return "Cursor: nicht angemeldet"
+    if snapshot.error == "http":
+        return "Cursor: API-Fehler"
+    if snapshot.error == "network":
+        return "Cursor: offline"
+    return snapshot.label
+
+
+def render_deskband(pipe: ControlPipe, snapshot: UsageSnapshot) -> None:
+    pipe.clear()
+
+    if snapshot.error:
+        pipe.add_new_text_info(_error_headline(snapshot), *ERROR_COLOR)
+        pipe.paint()
+        return
+
     if snapshot.display_mode == "overall":
-        text = (
-            f"{int(snapshot.cursor_pct)}"
-            if snapshot.cursor_pct is not None
-            else "…"
-        )
-        return text, text
-    left = (
-        f"{int(snapshot.cursor_pct)}"
-        if snapshot.cursor_pct is not None
-        else "?"
+        title = pipe.add_new_text_info("Included", *LABEL_COLOR)
+        value = pipe.add_new_text_info(_value_text(snapshot, "cursor"), *_value_color(snapshot, "cursor"))
+        value.justify_this_with_respect_to_that(title, Justification.RIGHT_OF, gap=8)
+        pipe.paint()
+        return
+
+    cursor_title = pipe.add_new_text_info("Cursor", *LABEL_COLOR)
+    cursor_value = pipe.add_new_text_info(
+        _value_text(snapshot, "cursor"),
+        *_value_color(snapshot, "cursor"),
     )
-    right = (
-        f"{int(snapshot.other_pct)}"
-        if snapshot.other_pct is not None
-        else "?"
+    cursor_value.justify_this_with_respect_to_that(cursor_title, Justification.RIGHT_OF, gap=6)
+
+    other_title = pipe.add_new_text_info("Other", *LABEL_COLOR)
+    other_title.justify_this_with_respect_to_that(cursor_value, Justification.RIGHT_OF, gap=18)
+
+    other_value = pipe.add_new_text_info(
+        _value_text(snapshot, "other"),
+        *_value_color(snapshot, "other"),
     )
-    return left, right
+    other_value.justify_this_with_respect_to_that(other_title, Justification.RIGHT_OF, gap=6)
+
+    pipe.paint()
 
 
-def render_tray_icon(snapshot: UsageSnapshot, size: int = 256) -> Image.Image:
-    """Split-badge tray icon: full square used for two large pool values."""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    mid = size // 2
-    radius = max(2, size // 16)
-    bg = (24, 26, 30, 255)
-
-    draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=bg)
-
-    left_text, right_text = _badge_text(snapshot)
-    left_color = pct_arc_color(snapshot.cursor_pct or 0)
-    right_color = pct_arc_color(snapshot.other_pct or 0)
-
-    if not snapshot.error:
-        left_fill = (*left_color, 70)
-        right_fill = (*right_color, 70)
-        draw.rectangle((1, 1, mid - 1, size - 2), fill=left_fill)
-        draw.rectangle((mid + 1, 1, size - 2, size - 2), fill=right_fill)
-
-    draw.line([(mid, 4), (mid, size - 5)], fill=(255, 255, 255, 90), width=max(1, size // 64))
-
-    font_px = max(7, int(size * 0.34))
-    font = _load_font(font_px, bold=True)
-    stroke = max(1, size // 48)
-
-    for text, cx, color in (
-        (left_text, mid * 0.5, left_color),
-        (right_text, mid + mid * 0.5, right_color),
-    ):
-        draw.text(
-            (cx, size / 2),
-            text,
-            fill=(255, 255, 255, 255),
-            font=font,
-            anchor="mm",
-            stroke_width=stroke,
-            stroke_fill=(*color, 255),
-        )
-
-    return img
+def deskband_available() -> bool:
+    try:
+        with ControlPipe() as pipe:
+            pipe.get_height()
+        return True
+    except FileNotFoundError:
+        return False
 
 
-def render_tray_icon_set(snapshot: UsageSnapshot) -> Image.Image:
-    layers = [render_tray_icon(snapshot, size) for size in TRAY_ICON_SIZES]
-    master = layers[-1]
-    master.save = _make_ico_save(master, layers)  # type: ignore[method-assign]
-    return master
-
-
-def _make_ico_save(master: Image.Image, layers: list[Image.Image]):
-    def save(fp, format=None, **kwargs):
-        if format and format.upper() != "ICO":
-            return Image.Image.save(master, fp, format, **kwargs)
-        sizes = [(img.width, img.height) for img in layers]
-        Image.Image.save(
-            layers[-1],
-            fp,
-            format="ICO",
-            sizes=sizes,
-            append_images=layers[:-1],
-        )
-
-    return save
-
-
-class TrayApp:
-    def __init__(self) -> None:
-        self._snapshot = UsageSnapshot("…", "Loading…", None)
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._icon = pystray.Icon(
-            "cursor-token-tray",
-            render_tray_icon_set(self._snapshot),
-            "Cursor Token Usage",
-            menu=pystray.Menu(
-                pystray.MenuItem("Jetzt aktualisieren", self._on_refresh),
-                pystray.MenuItem("Beenden", self._on_exit),
-            ),
-        )
-
-    def _apply_snapshot(self, snapshot: UsageSnapshot) -> None:
-        with self._lock:
-            self._snapshot = snapshot
-        self._icon.icon = render_tray_icon_set(snapshot)
-        self._icon.title = snapshot.tooltip.replace("\n", " · ")
-
-    def _poll_once(self) -> None:
-        self._apply_snapshot(fetch_usage())
-
-    def _on_refresh(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
-        threading.Thread(target=self._poll_once, daemon=True).start()
-
-    def _on_exit(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
-        self._stop.set()
-        self._icon.stop()
-
-    def _poll_loop(self) -> None:
-        while not self._stop.wait(POLL_SECONDS):
-            self._poll_once()
-
+class DeskbandApp:
     def run(self) -> None:
-        self._poll_once()
-        threading.Thread(target=self._poll_loop, daemon=True).start()
-        self._icon.run()
+        while True:
+            snapshot = fetch_usage()
+            with ControlPipe() as pipe:
+                render_deskband(pipe, snapshot)
+            time.sleep(POLL_SECONDS)
 
 
 def main() -> None:
-    TrayApp().run()
+    from install_self import maybe_install
+
+    maybe_install()
+
+    if deskband_available():
+        DeskbandApp().run()
+        return
+
+    from taskbar_strip import run_taskbar_strip
+
+    run_taskbar_strip()
 
 
 if __name__ == "__main__":
