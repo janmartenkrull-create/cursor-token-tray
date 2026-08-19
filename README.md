@@ -9,23 +9,17 @@ Inspired by the [Cursor Token Usage](https://open-vsx.org/extension/akitogo/curs
 - Polls `https://cursor.com/api/usage-summary` every **5 minutes**
 - Reads your local Cursor session from `state.vscdb` (no manual token setup if you're signed in)
 - Taskbar display: `Cursor 35%   Other 83%` (readable width, like weather/clock widgets)
-- Color-coded by usage level (blue → yellow → red)
+- Color-coded by usage level (gray → orange → red)
 - **Windows 11:** uses a docked taskbar widget automatically (native deskbands are removed)
 - **Windows 10:** can use the optional deskband toolbar (see below)
 
-## Für andere Nutzer (eine Datei)
+## Install
 
-1. `packaging\build.bat` ausführen
-2. `dist\CursorTokenUsage.exe` weitergeben (USB, Chat, GitHub Release)
+Download `CursorTokenUsage.exe` from the [latest release](https://github.com/janmartenkrull-create/cursor-token-tray/releases/latest), run it, and choose **Install** (or **Run once**).
 
-Andere brauchen **kein Python**. Beim ersten Start erscheint ein kleiner Dialog:
+Requires Windows 10/11 (64-bit) and Cursor signed in on this PC.
 
-- **Installieren** — kopiert nach `%LOCALAPPDATA%\CursorTokenUsage`, optional Startmenü + Autostart
-- **Nur starten** — einmalig, ohne Installation
-
-Deinstallieren: `%LOCALAPPDATA%\CursorTokenUsage\Uninstall.bat`
-
-## Entwicklung
+## Development
 
 ```bat
 git clone https://github.com/janmartenkrull-create/cursor-token-tray.git
@@ -33,7 +27,13 @@ cd cursor-token-tray
 pyw -3 cursor_token_tray.py
 ```
 
-Oder `start-tray.bat`. Python 3.10+ mit tkinter, Cursor muss auf dem PC angemeldet sein.
+Or double-click `start-tray.bat`. Requires Python 3.10+ with tkinter.
+
+Build the portable exe:
+
+```bat
+packaging\build.bat
+```
 
 ### Optional: deskband toolbar (Windows 10 only)
 
@@ -47,15 +47,16 @@ On Windows 10 you can register a native toolbar instead:
 
 ## Autostart
 
-Die App legt beim Start automatisch eine Verknüpfung im Windows-Autostart an (`shell:startup`), falls noch keine existiert. Ab dem nächsten Anmelden startet sie mit Windows.
+The app creates a shortcut in the Windows startup folder (`shell:startup`) on first run if one does not already exist. It will start automatically on the next sign-in.
 
-Autostart deaktivieren: Verknüpfung **Cursor Token Usage** im Autostart-Ordner löschen, oder die App mit `--no-autostart` starten.
+To disable autostart, delete the **Cursor Token Usage** shortcut from the startup folder, or launch the app with `--no-autostart`.
 
 ## How it works
 
-1. A small COM DLL (`pydeskband/dlls/PyDeskband_x64.dll`) draws text on the taskbar
-2. Python polls the Cursor API and updates the display via a named pipe
-3. Session data stays local; requests go only to `cursor.com`
+1. On Windows 11, a small taskbar widget shows usage next to the system tray
+2. On Windows 10, an optional COM DLL (`pydeskband/dlls/PyDeskband_x64.dll`) can draw text on the taskbar
+3. The app polls the Cursor API and reads your local session from `state.vscdb`
+4. Session data stays local; requests go only to `cursor.com`
 
 ## Building the DLL (optional)
 
