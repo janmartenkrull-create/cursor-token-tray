@@ -40,12 +40,6 @@ user32.GetParent.restype = ctypes.c_void_p
 user32.GetParent.argtypes = [ctypes.c_void_p]
 user32.IsWindow.argtypes = [ctypes.c_void_p]
 user32.IsWindow.restype = ctypes.c_bool
-user32.GetDC.argtypes = [ctypes.c_void_p]
-user32.GetDC.restype = ctypes.c_void_p
-user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-gdi32 = ctypes.windll.gdi32
-gdi32.GetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
-gdi32.GetPixel.restype = ctypes.c_uint
 
 
 class RECT(ctypes.Structure):
@@ -102,26 +96,28 @@ def _rgb_hex(rgb: tuple[int, int, int]) -> str:
     return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
 
-def _fallback_taskbar_bg(light: bool) -> str:
-    return "#f3f3f3" if light else "#202020"
-
-
-def _sample_taskbar_bg() -> str:
-    rect = _taskbar_rect()
-    if not rect:
-        return _fallback_taskbar_bg(_uses_light_taskbar())
-    hdc = user32.GetDC(0)
-    if not hdc:
-        return _fallback_taskbar_bg(_uses_light_taskbar())
+def _taskbar_bg(light: bool) -> str:
+    if not light:
+        return "#1c1c1c"
     try:
-        x = rect.left + max(80, (rect.right - rect.left) // 4)
-        y = rect.top + max(1, (rect.bottom - rect.top) // 2)
-        pixel = gdi32.GetPixel(hdc, x, y)
-        if pixel == 0xFFFFFFFF:
-            return _fallback_taskbar_bg(_uses_light_taskbar())
-        return _rgb_hex((pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF))
-    finally:
-        user32.ReleaseDC(0, hdc)
+        color = ctypes.c_uint()
+        opaque = ctypes.c_bool()
+        ctypes.windll.dwmapi.DwmGetColorizationColor(
+            ctypes.byref(color),
+            ctypes.byref(opaque),
+        )
+        c = color.value
+        r, g, b = (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF
+        mix = tuple(int(channel * 0.12 + 243 * 0.88) for channel in (r, g, b))
+        return _rgb_hex(mix)
+    except OSError:
+        return "#f3f3f3"
+
+
+def _theme_colors(light: bool) -> tuple[str, str, str]:
+    if light:
+        return _taskbar_bg(True), "#4b5563", "#9ca3af"
+    return _taskbar_bg(False), "#d1d5db", "#404040"
 
 
 def _apply_bg(widget: tk.Misc, color: str) -> None:
@@ -136,13 +132,7 @@ class TaskbarStripApp:
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._light = _uses_light_taskbar()
-        self._bg = _sample_taskbar_bg()
-        if self._light:
-            self._label_fg = "#4b5563"
-            self._track = "#9ca3af"
-        else:
-            self._label_fg = "#d1d5db"
-            self._track = "#6b7280"
+        self._bg, self._label_fg, self._track = _theme_colors(self._light)
 
         self._last_geom = ""
         self._hwnd = 0
@@ -279,9 +269,13 @@ class TaskbarStripApp:
         return f"{width}x{height}+{x}+{y}"
 
     def _sync_background(self) -> None:
-        bg = _sample_taskbar_bg()
-        if bg == self._bg:
+        light = _uses_light_taskbar()
+        bg, label_fg, track = _theme_colors(light)
+        if light == self._light and bg == self._bg:
             return
+        self._light = light
+        self._label_fg = label_fg
+        self._track = track
         self._bg = bg
         _apply_bg(self.root, bg)
         _apply_bg(self.canvas, bg)
