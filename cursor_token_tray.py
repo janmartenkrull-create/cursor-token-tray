@@ -321,36 +321,43 @@ def _draw_arc_progress(
     draw.arc(bbox, start=start, end=end, fill=(*color, 255), width=width)
 
 
-def render_icon(snapshot: UsageSnapshot, size: int = 64) -> Image.Image:
+def _draw_side_label(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    x: float,
+    cy: float,
+    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    color: tuple[int, int, int],
+    anchor: str,
+) -> None:
+    tb = draw.textbbox((0, 0), text, font=font, anchor=anchor)
+    th = tb[3] - tb[1]
+    draw.text((x, cy), text, fill=(*color, 255), font=font, anchor=anchor)
+
+
+def render_icon(snapshot: UsageSnapshot, size: int = 128) -> Image.Image:
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    pad = max(2, int(size * 0.06))
-    bbox = (pad, pad, size - pad, size - pad)
-    cx = size / 2
-    ring = max(2, int(size * 0.11))
-    bg = (30, 32, 36, 255)
-    track = (54, 58, 64, 255)
-    divider = (42, 45, 50, 255)
+    cy = size / 2
+    track = (72, 76, 84, 220)
+    ring = max(3, int(size * 0.14))
 
-    draw.ellipse(bbox, fill=bg)
+    # Side labels sit in the margins; the ring stays a true circle.
+    label_w = max(16, int(size * 0.15))
+    ring_d = size - 2 * label_w
+    ring_top = (size - ring_d) / 2
+    bbox = (label_w, ring_top, size - label_w, ring_top + ring_d)
+    cx = size / 2
 
     if snapshot.error:
-        font = _load_font(max(8, size // 5), bold=True)
-        text = "?"
-        tb = draw.textbbox((0, 0), text, font=font)
-        tw, th = tb[2] - tb[0], tb[3] - tb[1]
-        draw.text(
-            (cx - tw / 2, cx - th / 2 - 1),
-            text,
-            fill=(150, 150, 150, 255),
-            font=font,
-        )
+        draw.arc(bbox, 0, 360, fill=track, width=ring)
+        font = _load_font(max(10, size // 6), bold=True)
+        _draw_side_label(draw, "?", cx, cy, font, (150, 150, 150), "mm")
         return img
 
-    # Left semicircle: top -> left -> bottom (90° .. 270°)
+    # Track arcs only — inner area stays transparent.
     draw.arc(bbox, 90, 270, fill=track, width=ring)
-    # Right semicircle: bottom -> right -> top (270° .. 90°)
     draw.arc(bbox, 270, 450, fill=track, width=ring)
 
     left_ratio = (
@@ -369,72 +376,41 @@ def render_icon(snapshot: UsageSnapshot, size: int = 64) -> Image.Image:
     )
 
     if snapshot.display_mode == "overall":
-        accent = pct_arc_color((snapshot.cursor_pct or 0) if snapshot.cursor_pct else 0)
+        accent = pct_arc_color(snapshot.cursor_pct or 0)
         _draw_arc_progress(draw, bbox, 90, 180, left_ratio, accent, ring)
         _draw_arc_progress(draw, bbox, 270, 180, right_ratio, accent, ring)
-    else:
-        _draw_arc_progress(
-            draw,
-            bbox,
-            90,
-            180,
-            left_ratio,
-            pct_arc_color(snapshot.cursor_pct or 0),
-            ring,
-        )
-        _draw_arc_progress(
-            draw,
-            bbox,
-            270,
-            180,
-            right_ratio,
-            pct_arc_color(snapshot.other_pct or 0),
-            ring,
-        )
-
-    draw.line(
-        [(cx, pad + ring // 2), (cx, size - pad - ring // 2)],
-        fill=divider,
-        width=max(1, size // 32),
-    )
-
-    if snapshot.display_mode == "overall":
-        center_text = (
+        left_text = (
             f"{int(snapshot.cursor_pct)}%"
             if snapshot.cursor_pct is not None
             else "…"
         )
-        font = _load_font(max(9, size // 4), bold=True)
-        color = (143, 163, 184, 255)
+        right_text = left_text
+        left_color = right_color = accent
     elif snapshot.is_unlimited:
-        center_text = "∞"
-        font = _load_font(max(10, size // 3), bold=True)
-        color = (143, 163, 184, 255)
+        left_text = right_text = "∞"
+        left_color = right_color = (143, 163, 184)
+        _draw_arc_progress(draw, bbox, 90, 180, 1.0, left_color, ring)
+        _draw_arc_progress(draw, bbox, 270, 180, 1.0, right_color, ring)
     else:
-        left_n = "?" if snapshot.cursor_pct is None else str(int(snapshot.cursor_pct))
-        right_n = "?" if snapshot.other_pct is None else str(int(snapshot.other_pct))
-        font = _load_font(max(7, size // 6), bold=True)
-        for text, x_frac, accent in (
-            (left_n, 0.30, pct_arc_color(snapshot.cursor_pct or 0)),
-            (right_n, 0.70, pct_arc_color(snapshot.other_pct or 0)),
-        ):
-            tb = draw.textbbox((0, 0), text, font=font)
-            tw, th = tb[2] - tb[0], tb[3] - tb[1]
-            draw.text(
-                (size * x_frac - tw / 2, cx - th / 2 - 1),
-                text,
-                fill=(*accent, 255),
-                font=font,
-            )
-        return img
+        left_text = (
+            f"{int(snapshot.cursor_pct)}%"
+            if snapshot.cursor_pct is not None
+            else "?"
+        )
+        right_text = (
+            f"{int(snapshot.other_pct)}%"
+            if snapshot.other_pct is not None
+            else "?"
+        )
+        left_color = pct_arc_color(snapshot.cursor_pct or 0)
+        right_color = pct_arc_color(snapshot.other_pct or 0)
+        _draw_arc_progress(draw, bbox, 90, 180, left_ratio, left_color, ring)
+        _draw_arc_progress(draw, bbox, 270, 180, right_ratio, right_color, ring)
 
-    tb = draw.textbbox((0, 0), center_text, font=font)
-    tw, th = tb[2] - tb[0], tb[3] - tb[1]
-    draw.text(
-        (cx - tw / 2, cx - th / 2 - 1),
-        center_text,
-        fill=color,
-        font=font,
+    font = _load_font(max(9, int(size * 0.13)), bold=True)
+    _draw_side_label(draw, left_text, max(1, label_w * 0.08), cy, font, left_color, "lm")
+    _draw_side_label(
+        draw, right_text, size - max(1, label_w * 0.08), cy, font, right_color, "rm"
     )
     return img
 
