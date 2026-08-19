@@ -19,7 +19,7 @@ from cursor_token_tray import (
 STRIP_WIDTH = 256
 TRAY_GAP = 8
 KEEP_ALIVE_MS = 200
-REPOSITION_MS = 1500
+REPOSITION_MS = 5000
 
 GWL_EXSTYLE = -20
 GWLP_HWNDPARENT = -8
@@ -135,6 +135,8 @@ class TaskbarStripApp:
         self._bg, self._label_fg, self._track = _theme_colors(self._light)
 
         self._last_geom = ""
+        self._pinned_offset: int | None = None
+        self._taskbar_bounds: tuple[int, int, int, int] | None = None
         self._hwnd = 0
         self._styles_applied = False
         self._menu_open = False
@@ -191,9 +193,6 @@ class TaskbarStripApp:
             style = int(user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) or 0)
             style |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
             user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
-            tray = _taskbar_hwnd()
-            if tray:
-                user32.SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, tray)
             self._styles_applied = True
 
         if self._menu_open:
@@ -252,21 +251,25 @@ class TaskbarStripApp:
             self._height = event.height
             self._draw()
 
+    def _measure_tray_offset(self, rect: RECT) -> int:
+        notify_left = _tray_notify_left()
+        if notify_left is None:
+            return 320
+        return max(120, rect.right - notify_left + TRAY_GAP)
+
     def _desired_geometry(self) -> str | None:
         rect = _taskbar_rect()
         if not rect:
             return None
+        key = (rect.left, rect.top, rect.right, rect.bottom)
+        if self._pinned_offset is None or self._taskbar_bounds != key:
+            self._pinned_offset = self._measure_tray_offset(rect)
+            self._taskbar_bounds = key
         height = max(40, rect.bottom - rect.top)
-        width = STRIP_WIDTH
-        notify_left = _tray_notify_left()
-        if notify_left is not None:
-            x = notify_left - width - TRAY_GAP
-        else:
-            x = rect.right - width - 320
-        y = rect.top
+        x = rect.right - STRIP_WIDTH - self._pinned_offset
         if x < rect.left:
             x = rect.left
-        return f"{width}x{height}+{x}+{y}"
+        return f"{STRIP_WIDTH}x{height}+{x}+{rect.top}"
 
     def _sync_background(self) -> None:
         light = _uses_light_taskbar()
