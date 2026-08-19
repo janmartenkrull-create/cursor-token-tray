@@ -187,25 +187,17 @@ def _offer_dialog() -> dict[str, object]:
 
     tk.Label(
         frame,
-        text="Cursor Token Usage einrichten",
+        text="Set up Cursor Token Usage",
         font=("Segoe UI", 14, "bold"),
         fg="#f3f3f3",
         bg="#202020",
-    ).pack(anchor="w")
-    tk.Label(
-        frame,
-        text="Kein Python, keine Admin-Rechte.\nInstalliert für diesen Windows-Benutzer.",
-        font=("Segoe UI", 9),
-        fg="#b4b4b4",
-        bg="#202020",
-        justify="left",
-    ).pack(anchor="w", pady=(6, 16))
+    ).pack(anchor="w", pady=(0, 16))
 
     start_menu_var = tk.BooleanVar(value=True)
     autostart_var = tk.BooleanVar(value=True)
     tk.Checkbutton(
         frame,
-        text="Im Startmenü anzeigen",
+        text="Show in Start menu",
         variable=start_menu_var,
         fg="#f3f3f3",
         bg="#202020",
@@ -216,7 +208,7 @@ def _offer_dialog() -> dict[str, object]:
     ).pack(anchor="w")
     tk.Checkbutton(
         frame,
-        text="Beim Anmelden automatisch starten",
+        text="Start automatically when Windows signs in",
         variable=autostart_var,
         fg="#f3f3f3",
         bg="#202020",
@@ -241,7 +233,7 @@ def _offer_dialog() -> dict[str, object]:
 
     tk.Button(
         buttons,
-        text="Nur starten",
+        text="Run once",
         command=run_clicked,
         font=("Segoe UI", 9),
         relief="flat",
@@ -250,7 +242,7 @@ def _offer_dialog() -> dict[str, object]:
     ).pack(side="right")
     tk.Button(
         buttons,
-        text="Installieren",
+        text="Install",
         command=install_clicked,
         font=("Segoe UI", 9, "bold"),
         relief="flat",
