@@ -34,7 +34,9 @@ Double-click `start-tray.bat`, or:
 pyw -3 cursor_token_tray.py
 ```
 
-The icon appears in the system tray (near the clock). Pin it via the `^` overflow menu if needed.
+A **readable overlay** appears just above the taskbar (left of the tray icons) showing `35%` · ring · `83%`. The small systray icon is only for the menu. Drag the overlay to reposition it; the position is saved.
+
+Right-click the overlay or tray icon: refresh / quit.
 
 ## Autostart
 

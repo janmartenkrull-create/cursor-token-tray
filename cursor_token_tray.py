@@ -3,25 +3,30 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
 import sqlite3
 import threading
-import time
+import tkinter as tk
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from tkinter import font as tkfont
+from typing import Any, Callable
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import pystray
 
 POLL_SECONDS = 300
 API_URL = "https://cursor.com/api/usage-summary"
 PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 USER_ID_RE = re.compile(r"user_[a-zA-Z0-9]{20,}")
+OVERLAY_WIDTH = 220
+OVERLAY_HEIGHT = 46
+OVERLAY_FONT = 15
 
 
 @dataclass
@@ -38,6 +43,10 @@ class UsageSnapshot:
 
 def cursor_appdata() -> Path:
     return Path(os.environ.get("APPDATA", "")) / "Cursor"
+
+
+def overlay_config_path() -> Path:
+    return Path(os.environ.get("APPDATA", "")) / "cursor-token-tray" / "overlay.json"
 
 
 def db_path() -> Path:
@@ -289,21 +298,46 @@ def pct_arc_color(pct: float) -> tuple[int, int, int]:
     return (143, 163, 184)
 
 
-def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    candidates = (
-        ("segoeuib.ttf", bold),
-        ("segoeui.ttf", not bold),
-        ("arialbd.ttf", bold),
-        ("arial.ttf", not bold),
-    )
-    for name, want_bold in candidates:
-        if want_bold != bold:
-            continue
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
-    return ImageFont.load_default()
+def rgb_hex(rgb: tuple[int, int, int]) -> str:
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+
+def work_area() -> tuple[int, int, int, int]:
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    rect = RECT()
+    ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def load_overlay_position() -> tuple[int, int] | None:
+    path = overlay_config_path()
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return int(data["x"]), int(data["y"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def save_overlay_position(x: int, y: int) -> None:
+    path = overlay_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"x": x, "y": y}), encoding="utf-8")
+
+
+def default_overlay_position() -> tuple[int, int]:
+    left, top, right, bottom = work_area()
+    x = right - OVERLAY_WIDTH - 180
+    y = bottom - OVERLAY_HEIGHT - 6
+    return max(left + 8, x), max(top + 8, y)
 
 
 def _draw_arc_progress(
@@ -321,68 +355,18 @@ def _draw_arc_progress(
     draw.arc(bbox, start=start, end=end, fill=(*color, 255), width=width)
 
 
-def _draw_side_label(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    x: float,
-    cy: float,
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-    color: tuple[int, int, int],
-    anchor: str,
-) -> None:
-    # Dark stroke keeps digits readable on light and dark taskbars.
-    draw.text(
-        (x, cy),
-        text,
-        fill=(*color, 255),
-        font=font,
-        anchor=anchor,
-        stroke_width=max(1, font.size // 10),
-        stroke_fill=(18, 20, 24, 255),
-    )
-
-
-def _fit_font(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    max_w: int,
-    max_h: int,
-    bold: bool = True,
-) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for px in range(max_h, 6, -1):
-        font = _load_font(px, bold=bold)
-        box = draw.textbbox((0, 0), text, font=font, anchor="mm")
-        if box[2] - box[0] <= max_w and box[3] - box[1] <= max_h:
-            return font
-    return _load_font(8, bold=bold)
-
-
-def render_icon(snapshot: UsageSnapshot, size: int = 256) -> Image.Image:
+def render_tray_icon(snapshot: UsageSnapshot, size: int = 64) -> Image.Image:
+    """Small systray glyph — readable numbers live in the taskbar overlay."""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-
-    cy = size / 2
+    pad = 6
+    bbox = (pad, pad, size - pad, size - pad)
+    ring = 5
     track = (58, 62, 70, 230)
-
-    # Digits dominate; the ring sits in a narrow center band.
-    side_w = int(size * 0.38)
-    ring_w = size - 2 * side_w
-    ring = max(2, int(size * 0.07))
-    ring_d = int(size * 0.58)
-    ring_left = side_w + (ring_w - ring_d) / 2
-    ring_top = (size - ring_d) / 2
-    bbox = (ring_left, ring_top, ring_left + ring_d, ring_top + ring_d)
-    cx = size / 2
-
-    if snapshot.error:
-        draw.arc(bbox, 0, 360, fill=track, width=ring)
-        font = _fit_font(draw, "?", side_w, int(size * 0.55))
-        _draw_side_label(draw, "?", cx, cy, font, (150, 150, 150), "mm")
-        return img
-
     draw.arc(bbox, 90, 270, fill=track, width=ring)
     draw.arc(bbox, 270, 450, fill=track, width=ring)
-
+    if snapshot.error:
+        return img
     left_ratio = (
         1.0
         if snapshot.is_unlimited
@@ -397,90 +381,279 @@ def render_icon(snapshot: UsageSnapshot, size: int = 256) -> Image.Image:
         if snapshot.other_pct is not None
         else 0.0
     )
-
-    if snapshot.display_mode == "overall":
-        accent = pct_arc_color(snapshot.cursor_pct or 0)
-        _draw_arc_progress(draw, bbox, 90, 180, left_ratio, accent, ring)
-        _draw_arc_progress(draw, bbox, 270, 180, right_ratio, accent, ring)
-        left_text = (
-            f"{int(snapshot.cursor_pct)}"
-            if snapshot.cursor_pct is not None
-            else "…"
-        )
-        right_text = left_text
-        left_color = right_color = accent
-    elif snapshot.is_unlimited:
-        left_text = right_text = "∞"
-        left_color = right_color = (143, 163, 184)
-        _draw_arc_progress(draw, bbox, 90, 180, 1.0, left_color, ring)
-        _draw_arc_progress(draw, bbox, 270, 180, 1.0, right_color, ring)
-    else:
-        left_text = (
-            f"{int(snapshot.cursor_pct)}"
-            if snapshot.cursor_pct is not None
-            else "?"
-        )
-        right_text = (
-            f"{int(snapshot.other_pct)}"
-            if snapshot.other_pct is not None
-            else "?"
-        )
-        left_color = pct_arc_color(snapshot.cursor_pct or 0)
-        right_color = pct_arc_color(snapshot.other_pct or 0)
-        _draw_arc_progress(draw, bbox, 90, 180, left_ratio, left_color, ring)
-        _draw_arc_progress(draw, bbox, 270, 180, right_ratio, right_color, ring)
-
-    label_h = int(size * 0.62)
-    left_font = _fit_font(draw, left_text, side_w - 2, label_h)
-    right_font = _fit_font(draw, right_text, side_w - 2, label_h)
-    _draw_side_label(draw, left_text, side_w / 2, cy, left_font, left_color, "mm")
-    _draw_side_label(draw, right_text, size - side_w / 2, cy, right_font, right_color, "mm")
+    _draw_arc_progress(
+        draw,
+        bbox,
+        90,
+        180,
+        left_ratio,
+        pct_arc_color(snapshot.cursor_pct or 0),
+        ring,
+    )
+    _draw_arc_progress(
+        draw,
+        bbox,
+        270,
+        180,
+        right_ratio,
+        pct_arc_color(snapshot.other_pct or 0),
+        ring,
+    )
     return img
 
 
+class TaskbarOverlay:
+    def __init__(
+        self,
+        root: tk.Tk,
+        on_refresh: Callable[[], None],
+        on_exit: Callable[[], None],
+    ) -> None:
+        self.root = root
+        self.on_refresh = on_refresh
+        self.on_exit = on_exit
+        self._drag: tuple[int, int] | None = None
+
+        root.overrideredirect(True)
+        root.attributes("-topmost", True)
+        root.configure(bg="#1a1c20")
+        root.wm_attributes("-transparentcolor", "")  # no-op fallback
+
+        pos = load_overlay_position() or default_overlay_position()
+        root.geometry(f"{OVERLAY_WIDTH}x{OVERLAY_HEIGHT}+{pos[0]}+{pos[1]}")
+
+        self.frame = tk.Frame(
+            root,
+            bg="#1a1c20",
+            highlightthickness=1,
+            highlightbackground="#3a3f48",
+        )
+        self.frame.pack(fill="both", expand=True, padx=1, pady=1)
+
+        self.left_var = tk.StringVar(value="…")
+        self.right_var = tk.StringVar(value="…")
+        self.label_font = tkfont.Font(family="Segoe UI", size=OVERLAY_FONT, weight="bold")
+        self.sub_font = tkfont.Font(family="Segoe UI", size=8)
+
+        self.left_label = tk.Label(
+            self.frame,
+            textvariable=self.left_var,
+            font=self.label_font,
+            fg="#9fb0c3",
+            bg="#1a1c20",
+            width=5,
+            anchor="e",
+        )
+        self.left_label.pack(side="left", padx=(10, 4))
+
+        self.canvas = tk.Canvas(
+            self.frame,
+            width=34,
+            height=34,
+            bg="#1a1c20",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.canvas.pack(side="left", padx=2, pady=4)
+
+        self.right_label = tk.Label(
+            self.frame,
+            textvariable=self.right_var,
+            font=self.label_font,
+            fg="#d49a63",
+            bg="#1a1c20",
+            width=5,
+            anchor="w",
+        )
+        self.right_label.pack(side="left", padx=(4, 10))
+
+        for widget in (self.frame, self.left_label, self.canvas, self.right_label):
+            widget.bind("<ButtonPress-1>", self._start_drag)
+            widget.bind("<B1-Motion>", self._on_drag)
+            widget.bind("<ButtonRelease-1>", self._end_drag)
+            widget.bind("<Button-3>", self._show_menu)
+
+        self.menu = tk.Menu(root, tearoff=0)
+        self.menu.add_command(label="Jetzt aktualisieren", command=on_refresh)
+        self.menu.add_command(label="Beenden", command=on_exit)
+
+        self.update(UsageSnapshot("…", "Loading…", None))
+
+    def _start_drag(self, event: tk.Event) -> None:
+        self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+
+    def _on_drag(self, event: tk.Event) -> None:
+        if self._drag is None:
+            return
+        x = event.x_root - self._drag[0]
+        y = event.y_root - self._drag[1]
+        self.root.geometry(f"+{x}+{y}")
+
+    def _end_drag(self, _event: tk.Event) -> None:
+        self._drag = None
+        save_overlay_position(self.root.winfo_x(), self.root.winfo_y())
+
+    def _show_menu(self, event: tk.Event) -> None:
+        self.menu.tk_popup(event.x_root, event.y_root)
+
+    def _draw_canvas(
+        self,
+        left_pct: float | None,
+        right_pct: float | None,
+        is_unlimited: bool,
+    ) -> None:
+        self.canvas.delete("all")
+        cx, cy, r = 17, 17, 14
+        track = "#3a3f48"
+        width = 4
+        self.canvas.create_arc(
+            cx - r, cy - r, cx + r, cy + r,
+            start=90, extent=180, style="arc", outline=track, width=width,
+        )
+        self.canvas.create_arc(
+            cx - r, cy - r, cx + r, cy + r,
+            start=270, extent=180, style="arc", outline=track, width=width,
+        )
+        if is_unlimited:
+            color = rgb_hex((143, 163, 184))
+            self.canvas.create_arc(
+                cx - r, cy - r, cx + r, cy + r,
+                start=90, extent=180, style="arc", outline=color, width=width,
+            )
+            self.canvas.create_arc(
+                cx - r, cy - r, cx + r, cy + r,
+                start=270, extent=180, style="arc", outline=color, width=width,
+            )
+            return
+        if left_pct is not None and left_pct > 0:
+            self.canvas.create_arc(
+                cx - r, cy - r, cx + r, cy + r,
+                start=90,
+                extent=max(2, 180 * min(left_pct, 100) / 100),
+                style="arc",
+                outline=rgb_hex(pct_arc_color(left_pct)),
+                width=width,
+            )
+        if right_pct is not None and right_pct > 0:
+            self.canvas.create_arc(
+                cx - r, cy - r, cx + r, cy + r,
+                start=270,
+                extent=max(2, 180 * min(right_pct, 100) / 100),
+                style="arc",
+                outline=rgb_hex(pct_arc_color(right_pct)),
+                width=width,
+            )
+
+    def update(self, snapshot: UsageSnapshot) -> None:
+        if snapshot.error:
+            self.left_var.set("?")
+            self.right_var.set("?")
+            self.left_label.configure(fg="#888888")
+            self.right_label.configure(fg="#888888")
+            self._draw_canvas(None, None, False)
+            self.root.title(snapshot.tooltip)
+            return
+
+        if snapshot.is_unlimited:
+            self.left_var.set("∞")
+            self.right_var.set("∞")
+        elif snapshot.display_mode == "overall":
+            text = (
+                f"{int(snapshot.cursor_pct)}%"
+                if snapshot.cursor_pct is not None
+                else "…"
+            )
+            self.left_var.set(text)
+            self.right_var.set(text)
+        else:
+            self.left_var.set(
+                f"{int(snapshot.cursor_pct)}%"
+                if snapshot.cursor_pct is not None
+                else "?"
+            )
+            self.right_var.set(
+                f"{int(snapshot.other_pct)}%"
+                if snapshot.other_pct is not None
+                else "?"
+            )
+
+        self.left_label.configure(fg=rgb_hex(pct_arc_color(snapshot.cursor_pct or 0)))
+        self.right_label.configure(fg=rgb_hex(pct_arc_color(snapshot.other_pct or 0)))
+        self._draw_canvas(snapshot.cursor_pct, snapshot.other_pct, snapshot.is_unlimited)
+        self.root.title(snapshot.tooltip.replace("\n", " · "))
+
+
 class TrayApp:
-    def __init__(self) -> None:
+    def __init__(self, overlay: TaskbarOverlay, root: tk.Tk) -> None:
+        self._overlay = overlay
+        self._root = root
         self._snapshot = UsageSnapshot("…", "Loading…", None)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._icon = pystray.Icon(
             "cursor-token-tray",
-            render_icon(self._snapshot),
+            render_tray_icon(self._snapshot),
             "Cursor Token Usage",
             menu=pystray.Menu(
-                pystray.MenuItem("Jetzt aktualisieren", self._on_refresh),
-                pystray.MenuItem("Beenden", self._on_exit),
+                pystray.MenuItem("Jetzt aktualisieren", self._menu_refresh),
+                pystray.MenuItem("Beenden", self._menu_exit),
             ),
         )
 
     def _apply_snapshot(self, snapshot: UsageSnapshot) -> None:
         with self._lock:
             self._snapshot = snapshot
-        self._icon.icon = render_icon(snapshot)
-        self._icon.title = snapshot.tooltip.replace("\n", " · ")
+
+        def apply_ui() -> None:
+            self._overlay.update(snapshot)
+            self._icon.icon = render_tray_icon(snapshot)
+            self._icon.title = snapshot.tooltip.replace("\n", " · ")
+
+        self._root.after(0, apply_ui)
 
     def _poll_once(self) -> None:
         self._apply_snapshot(fetch_usage())
 
-    def _on_refresh(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+    def _menu_refresh(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
         threading.Thread(target=self._poll_once, daemon=True).start()
 
-    def _on_exit(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+    def _menu_exit(self, _icon: pystray.Icon, _item: pystray.MenuItem) -> None:
+        self.stop()
+
+    def stop(self) -> None:
         self._stop.set()
         self._icon.stop()
+        self._root.after(0, self._root.destroy)
 
     def _poll_loop(self) -> None:
         while not self._stop.wait(POLL_SECONDS):
             self._poll_once()
 
-    def run(self) -> None:
+    def run_tray(self) -> None:
         self._poll_once()
         threading.Thread(target=self._poll_loop, daemon=True).start()
         self._icon.run()
 
 
 def main() -> None:
-    TrayApp().run()
+    root = tk.Tk()
+    app_holder: dict[str, TrayApp] = {}
+
+    def on_exit() -> None:
+        app = app_holder.get("app")
+        if app:
+            app.stop()
+
+    def on_refresh() -> None:
+        app = app_holder.get("app")
+        if app:
+            threading.Thread(target=app._poll_once, daemon=True).start()
+
+    overlay = TaskbarOverlay(root, on_refresh=on_refresh, on_exit=on_exit)
+    app = TrayApp(overlay, root)
+    app_holder["app"] = app
+    threading.Thread(target=app.run_tray, daemon=True).start()
+    root.mainloop()
 
 
 if __name__ == "__main__":
