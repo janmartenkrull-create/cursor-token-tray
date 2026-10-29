@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import ctypes
 import json
 import os
 import re
@@ -11,6 +13,17 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from ctypes import (
+    POINTER,
+    byref,
+    c_char,
+    c_ubyte,
+    c_ulong,
+    c_ulonglong,
+    c_void_p,
+    cast,
+    sizeof,
+)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +34,7 @@ POLL_SECONDS = 300
 API_URL = "https://cursor.com/api/usage-summary"
 PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 USER_ID_RE = re.compile(r"user_[a-zA-Z0-9]{20,}")
+SEALED_PREFIX = "cursor-safe-storage:v1:"
 
 LABEL_COLOR = (170, 178, 188)
 ERROR_COLOR = (230, 120, 120)
@@ -59,6 +73,254 @@ def read_db_value(key: str) -> str | None:
         return row[0] if row and row[0] else None
     finally:
         conn.close()
+
+
+class TokenUnsealError(Exception):
+    """Cursor sealed the session and it could not be decrypted on this PC."""
+
+
+_os_crypt_key: bytes | None = None
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [("cbData", c_ulong), ("pbData", POINTER(c_char))]
+
+
+class _BcryptAuthInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", c_ulong),
+        ("dwInfoVersion", c_ulong),
+        ("pbNonce", POINTER(c_ubyte)),
+        ("cbNonce", c_ulong),
+        ("pbAuthData", POINTER(c_ubyte)),
+        ("cbAuthData", c_ulong),
+        ("pbTag", POINTER(c_ubyte)),
+        ("cbTag", c_ulong),
+        ("pbMacContext", POINTER(c_ubyte)),
+        ("cbMacContext", c_ulong),
+        ("cbAAD", c_ulong),
+        ("cbData", c_ulonglong),
+        ("dwFlags", c_ulong),
+    ]
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    crypt32.CryptUnprotectData.argtypes = [
+        POINTER(_DataBlob),
+        POINTER(c_void_p),
+        POINTER(_DataBlob),
+        c_void_p,
+        c_void_p,
+        c_ulong,
+        POINTER(_DataBlob),
+    ]
+    crypt32.CryptUnprotectData.restype = ctypes.c_int
+    kernel32.LocalFree.argtypes = [c_void_p]
+    kernel32.LocalFree.restype = c_void_p
+    buffer = ctypes.create_string_buffer(data)
+    blob_in = _DataBlob(len(data), cast(buffer, POINTER(c_char)))
+    blob_out = _DataBlob()
+    if not crypt32.CryptUnprotectData(
+        byref(blob_in), None, None, None, None, 0, byref(blob_out)
+    ):
+        raise TokenUnsealError(f"dpapi {ctypes.get_last_error()}")
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def _cursor_os_crypt_key() -> bytes:
+    global _os_crypt_key
+    if _os_crypt_key is not None:
+        return _os_crypt_key
+    path = cursor_appdata() / "Local State"
+    try:
+        local = json.loads(path.read_text(encoding="utf-8"))
+        encrypted_key = base64.b64decode(local["os_crypt"]["encrypted_key"])
+    except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        raise TokenUnsealError("missing os_crypt key") from exc
+    if encrypted_key.startswith(b"DPAPI"):
+        encrypted_key = encrypted_key[5:]
+    _os_crypt_key = _dpapi_unprotect(encrypted_key)
+    return _os_crypt_key
+
+
+def _aes_gcm_decrypt(key: bytes, nonce: bytes, payload: bytes) -> bytes:
+    if len(payload) < 16:
+        raise TokenUnsealError("ciphertext too short")
+    ciphertext, tag = payload[:-16], payload[-16:]
+    bcrypt = ctypes.WinDLL("bcrypt", use_last_error=True)
+    bcrypt.BCryptOpenAlgorithmProvider.argtypes = [
+        POINTER(c_void_p),
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        c_ulong,
+    ]
+    bcrypt.BCryptOpenAlgorithmProvider.restype = c_ulong
+    bcrypt.BCryptSetProperty.argtypes = [
+        c_void_p,
+        ctypes.c_wchar_p,
+        POINTER(c_ubyte),
+        c_ulong,
+        c_ulong,
+    ]
+    bcrypt.BCryptSetProperty.restype = c_ulong
+    bcrypt.BCryptGetProperty.argtypes = [
+        c_void_p,
+        ctypes.c_wchar_p,
+        POINTER(c_ubyte),
+        c_ulong,
+        POINTER(c_ulong),
+        c_ulong,
+    ]
+    bcrypt.BCryptGetProperty.restype = c_ulong
+    bcrypt.BCryptGenerateSymmetricKey.argtypes = [
+        c_void_p,
+        POINTER(c_void_p),
+        POINTER(c_ubyte),
+        c_ulong,
+        POINTER(c_ubyte),
+        c_ulong,
+        c_ulong,
+    ]
+    bcrypt.BCryptGenerateSymmetricKey.restype = c_ulong
+    bcrypt.BCryptDecrypt.argtypes = [
+        c_void_p,
+        POINTER(c_ubyte),
+        c_ulong,
+        c_void_p,
+        POINTER(c_ubyte),
+        c_ulong,
+        POINTER(c_ubyte),
+        c_ulong,
+        POINTER(c_ulong),
+        c_ulong,
+    ]
+    bcrypt.BCryptDecrypt.restype = c_ulong
+    bcrypt.BCryptDestroyKey.argtypes = [c_void_p]
+    bcrypt.BCryptDestroyKey.restype = c_ulong
+    bcrypt.BCryptCloseAlgorithmProvider.argtypes = [c_void_p, c_ulong]
+    bcrypt.BCryptCloseAlgorithmProvider.restype = c_ulong
+
+    def _check(status: int, step: str) -> None:
+        if status != 0:
+            raise TokenUnsealError(f"{step} {status:#x}")
+
+    algorithm = c_void_p()
+    _check(
+        bcrypt.BCryptOpenAlgorithmProvider(byref(algorithm), "AES", None, 0),
+        "open",
+    )
+    try:
+        chain = "ChainingModeGCM\0".encode("utf-16le")
+        chain_buf = (c_ubyte * len(chain)).from_buffer_copy(chain)
+        _check(
+            bcrypt.BCryptSetProperty(
+                algorithm, "ChainingMode", chain_buf, len(chain), 0
+            ),
+            "chain",
+        )
+        object_len = c_ulong()
+        written = c_ulong()
+        _check(
+            bcrypt.BCryptGetProperty(
+                algorithm,
+                "ObjectLength",
+                cast(byref(object_len), POINTER(c_ubyte)),
+                sizeof(object_len),
+                byref(written),
+                0,
+            ),
+            "object",
+        )
+        key_object = (c_ubyte * object_len.value)()
+        key_handle = c_void_p()
+        key_buf = (c_ubyte * len(key)).from_buffer_copy(key)
+        _check(
+            bcrypt.BCryptGenerateSymmetricKey(
+                algorithm,
+                byref(key_handle),
+                key_object,
+                object_len.value,
+                key_buf,
+                len(key),
+                0,
+            ),
+            "key",
+        )
+        try:
+            nonce_buf = (c_ubyte * len(nonce)).from_buffer_copy(nonce)
+            tag_buf = (c_ubyte * len(tag)).from_buffer_copy(tag)
+            info = _BcryptAuthInfo()
+            info.cbSize = sizeof(_BcryptAuthInfo)
+            info.dwInfoVersion = 1
+            info.pbNonce = cast(nonce_buf, POINTER(c_ubyte))
+            info.cbNonce = len(nonce)
+            info.pbTag = cast(tag_buf, POINTER(c_ubyte))
+            info.cbTag = len(tag)
+            cipher_buf = (c_ubyte * len(ciphertext)).from_buffer_copy(ciphertext)
+            out_len = c_ulong()
+            _check(
+                bcrypt.BCryptDecrypt(
+                    key_handle,
+                    cipher_buf,
+                    len(ciphertext),
+                    byref(info),
+                    None,
+                    0,
+                    None,
+                    0,
+                    byref(out_len),
+                    0,
+                ),
+                "size",
+            )
+            output = (c_ubyte * out_len.value)()
+            _check(
+                bcrypt.BCryptDecrypt(
+                    key_handle,
+                    cipher_buf,
+                    len(ciphertext),
+                    byref(info),
+                    None,
+                    0,
+                    output,
+                    out_len.value,
+                    byref(out_len),
+                    0,
+                ),
+                "decrypt",
+            )
+            return bytes(output[: out_len.value])
+        finally:
+            bcrypt.BCryptDestroyKey(key_handle)
+    finally:
+        bcrypt.BCryptCloseAlgorithmProvider(algorithm, 0)
+
+
+def unseal_stored_secret(value: str | None) -> str | None:
+    """Return a Cursor auth value, decrypting safeStorage seals from Cursor 3.27+."""
+    if not value:
+        return None
+    if not value.startswith(SEALED_PREFIX):
+        return value
+    try:
+        blob = base64.b64decode(value[len(SEALED_PREFIX) :])
+    except ValueError as exc:
+        raise TokenUnsealError("bad seal") from exc
+    if len(blob) < 3 + 12 + 16 or blob[:3] not in (b"v10", b"v11"):
+        raise TokenUnsealError("unexpected seal")
+    plain = _aes_gcm_decrypt(_cursor_os_crypt_key(), blob[3:15], blob[15:])
+    try:
+        text = plain.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TokenUnsealError("bad plaintext") from exc
+    if not text:
+        raise TokenUnsealError("empty")
+    return text
 
 
 def extract_user_id(raw: str | None) -> str | None:
@@ -103,7 +365,7 @@ def get_user_id() -> str | None:
 
 def get_session_cookie() -> str | None:
     user_id = get_user_id()
-    access_token = read_db_value("cursorAuth/accessToken")
+    access_token = unseal_stored_secret(read_db_value("cursorAuth/accessToken"))
     if not user_id or not access_token:
         return None
     return f"{user_id}%3A%3A{access_token}"
@@ -239,7 +501,15 @@ def parse_summary(data: dict[str, Any]) -> UsageSnapshot:
 
 
 def fetch_usage() -> UsageSnapshot:
-    cookie = get_session_cookie()
+    try:
+        cookie = get_session_cookie()
+    except TokenUnsealError:
+        return UsageSnapshot(
+            label="Locked",
+            tooltip="Cursor session is encrypted and could not be unlocked on this PC.",
+            max_ratio=None,
+            error="decrypt",
+        )
     if not cookie:
         return UsageSnapshot(
             label="No login",
@@ -323,6 +593,8 @@ def _value_color(snapshot: UsageSnapshot, side: str) -> tuple[int, int, int]:
 def _error_headline(snapshot: UsageSnapshot) -> str:
     if snapshot.error == "no_session":
         return "Cursor: nicht angemeldet"
+    if snapshot.error == "decrypt":
+        return "Cursor: Sitzung gesperrt"
     if snapshot.error == "http":
         return "Cursor: API-Fehler"
     if snapshot.error == "network":
